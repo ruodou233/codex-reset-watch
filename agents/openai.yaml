@@ -1,0 +1,5 @@
+interface:
+  display_name: "Codex 猛猛蹬"
+  short_description: "结合周额度、重置概率与安全储备，给出保守的 Token 使用建议"
+  default_prompt: "使用 $codex-reset-watch 检查我的 Codex 周额度、重置信号，并告诉我现在能不能猛猛蹬。"
+
