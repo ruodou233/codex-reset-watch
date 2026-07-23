@@ -7,6 +7,7 @@
 - Endpoint: `https://www.willcodexquotareset.com/api/forecast`
 - 使用字段：`forecast.score`、`forecast.resetAnnounced`、`forecast.breakdown`、`fetchedAt`、`sourceErrors`。
 - 定位：透明启发式评分，不视为统计校准概率。
+- 入选原因：同时提供评分、抓取时间和来源错误字段，便于审计“风声有多强、数据是否还活着”。
 
 ### Has Codex Rate Limit Reset Today
 
@@ -14,13 +15,14 @@
 - 使用字段：`automationSummary.verdict`、`tweetId`、`tweetUrl`、`checkedAt`、`mode`、`lastError`。
 - 定位：Tibo 帖子分类与“是否已确认”的辅助来源，不提供未来概率。
 - `reset_confirmed` 或明确 `state=yes` 可以将事件状态提升为“已宣布/已确认”，但不能证明用户个人到账。
+- 入选原因：补充具体帖子证据与事件确认状态；它与前一来源可能依赖同一帖子，因此不当作独立第二票。
 
 ## 聚合规则
 
 - 手动输入概率优先于网站评分，并标记为 `manual-probability`。
-- HasCodex 健康且明确确认重置时，确认事件分记为 100/100，但仍乘以套餐到账折扣；这不代表个人到账概率为 100%。
+- HasCodex 健康且明确确认重置时，确认事件分记为 100%，但仍乘以套餐到账折扣；这不代表个人到账概率为 100%。
 - HasCodex 未确认不能将未来概率压到 0；“今天没有确认”不等于“未来 48 小时不会发生”。
-- 公共数据超过两小时或来源报告内部错误时视为不可用，不用于积极建议；超过半小时开始施加新鲜度折扣。
+- 公共数据超过两小时或来源报告内部错误时视为不可用，不用于积极建议；超过半小时开始施加新鲜度折扣。半小时与两小时是针对高时效重置事件的操作默认：前半小时全权重，随后线性衰减，到两小时直接归零；这不是来源准确率的统计校准，应按上游更新节奏持续调整。
 - 两个网站可能依赖同一条 Tibo 原帖，不算两份独立证据。
 
 ## 本机 Codex 数据
@@ -41,4 +43,6 @@ account/rateLimits/read
 - 不读取浏览器 Cookie。
 - 不上传 Codex 凭据、邮箱、会话或提示词。
 - 网络请求会向上述网站暴露 IP、时间和 User-Agent。
+- 开源更新检查启用时还会访问 `github.com/ruodou233/codex-reset-watch`，同样会暴露 IP、时间和 User-Agent；可用 `~/.config/agentops-skills/no-update-check` 或 `~/.config/agentops-skills/codex-reset-watch.no-update-check` 关闭。
+- 更新检查只在 `~/.cache/codex-reset-watch/update-checked-at` 保存最近一次成功核验的 ISO 时间，不保存账户、仓库内容或额度数据。
 - 本地历史只记录额度百分比、窗口重置时间和采样时间，用于估算消耗速度。

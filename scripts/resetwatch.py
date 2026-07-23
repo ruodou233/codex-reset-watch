@@ -23,6 +23,7 @@ HAS_URL = "https://hascodexratelimitreset.today/api/status"
 WEEK_MINUTES = 7 * 24 * 60
 SOURCE_STALE_SECONDS = 2 * 60 * 60
 SOURCE_FRESH_SECONDS = 30 * 60
+MAX_FUTURE_SKEW_SECONDS = 5 * 60
 
 
 def utc_now() -> dt.datetime:
@@ -83,7 +84,10 @@ def fetch_json(url: str, timeout: float = 8.0) -> dict[str, Any]:
 def source_age_seconds(timestamp: dt.datetime | None) -> float | None:
     if timestamp is None:
         return None
-    return max(0.0, (utc_now() - timestamp).total_seconds())
+    age = (utc_now() - timestamp).total_seconds()
+    if age < -MAX_FUTURE_SKEW_SECONDS:
+        return None
+    return max(0.0, age)
 
 
 def freshness_multiplier(age: float | None) -> float:
@@ -92,7 +96,7 @@ def freshness_multiplier(age: float | None) -> float:
     if age <= SOURCE_FRESH_SECONDS:
         return 1.0
     span = SOURCE_STALE_SECONDS - SOURCE_FRESH_SECONDS
-    return 0.5 + 0.5 * (SOURCE_STALE_SECONDS - age) / span
+    return (SOURCE_STALE_SECONDS - age) / span
 
 
 def fetch_public_signal(manual_probability: float | None, no_network: bool) -> dict[str, Any]:
@@ -201,7 +205,9 @@ def fetch_public_signal(manual_probability: float | None, no_network: bool) -> d
         if confirmed and age is not None and age <= SOURCE_STALE_SECONDS:
             result["event_state"] = "confirmed"
             result["event_signal_raw"] = 100.0
-            result["event_signal_adjusted"] = 100.0
+            result["event_signal_adjusted"] = round(
+                100.0 * freshness_multiplier(age), 2
+            )
             result["signal_kind"] = "confirmed-event"
             result["signal_usable"] = True
         elif (
@@ -348,6 +354,22 @@ def history_path() -> pathlib.Path:
     return root / "snapshots.jsonl"
 
 
+def filter_history(
+    rows: list[dict[str, Any]], now: float | None = None
+) -> list[dict[str, Any]]:
+    current = time.time() if now is None else now
+    cutoff = current - 14 * 24 * 3600
+    future_limit = current + MAX_FUTURE_SKEW_SECONDS
+    return [
+        row
+        for row in rows
+        if (
+            isinstance(row.get("sampled_at"), (int, float))
+            and cutoff <= row["sampled_at"] <= future_limit
+        )
+    ]
+
+
 def load_history() -> list[dict[str, Any]]:
     path = history_path()
     if not path.exists():
@@ -365,8 +387,7 @@ def load_history() -> list[dict[str, Any]]:
                 rows.append(row)
     except Exception:
         return []
-    cutoff = time.time() - 14 * 24 * 3600
-    return [r for r in rows if isinstance(r.get("sampled_at"), (int, float)) and r["sampled_at"] >= cutoff]
+    return filter_history(rows)
 
 
 def save_snapshot(weekly: dict[str, Any]) -> None:
@@ -423,12 +444,12 @@ def estimate_burn(
 
 def advice_label(headroom: float) -> tuple[str, str]:
     if headroom >= 20:
-        return "猛猛蹬", "可以安排高消耗任务，但仍需保留安全垫。"
+        return "猛猛蹬", "额度跑在消耗前面，可以安排高消耗任务。"
     if headroom >= 8:
-        return "可以加速蹬", "可以提高使用强度，但不要一次性清空周额度。"
+        return "可以加速蹬", "额度还有余量，可以把使用强度提一档。"
     if headroom >= -5:
-        return "稳着蹬", "维持当前节奏，不要把尚未发生的临时重置当作确定额度。"
-    return "收着蹬", "按保守预测，当前额度可能撑不到正常周重置。"
+        return "稳着蹬", "当前节奏基本合适，先别追着重置风声加速。"
+    return "收着蹬", "照当前速度，额度可能比正常周重置更早见底。"
 
 
 def calculate_advice(
@@ -519,60 +540,163 @@ def manual_weekly(args: argparse.Namespace) -> dict[str, Any] | None:
     }
 
 
+def human_duration(hours: float) -> str:
+    total_minutes = max(0, round(hours * 60))
+    days, remainder = divmod(total_minutes, 24 * 60)
+    hours_part, minutes = divmod(remainder, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} 天")
+    if hours_part:
+        parts.append(f"{hours_part} 小时")
+    if not days and minutes:
+        parts.append(f"{minutes} 分钟")
+    return " ".join(parts) or "不到 1 分钟"
+
+
+def advice_action(label: str, reserve: float | None = None) -> str:
+    reserve_copy = (
+        f"至少留住 {reserve:.1f}% 的安全垫。" if reserve is not None else ""
+    )
+    actions = {
+        "猛猛蹬": f"高消耗任务可以上场，{reserve_copy}",
+        "可以加速蹬": f"可以多开一个重任务，{reserve_copy}",
+        "稳着蹬": f"维持现在的任务强度，{reserve_copy}",
+        "收着蹬": f"只跑今天非做不可的重任务，其余先排队；{reserve_copy}",
+        "先别赌": "关键账目没算齐，先别为传闻追加高消耗任务。",
+    }
+    return actions.get(label, "先按当前节奏使用，别把传闻当成到账额度。")
+
+
+def advice_title(label: str) -> str:
+    return {
+        "猛猛蹬": "猛猛蹬｜绿灯亮了，重任务排队上车",
+        "可以加速蹬": "可以加速蹬｜油门能再给一点，但别一脚到底",
+        "稳着蹬": "稳着蹬｜这档速度刚好，别追着风声跑",
+        "收着蹬": "收着蹬｜先松油门，别让额度提前下班",
+        "先别赌": "先别赌｜账本缺页，今天不押重置",
+    }.get(label, f"{label}｜先看清账本再动")
+
+
+def signal_strength(score: float, missing: bool = False) -> str:
+    if missing:
+        return "不可用"
+    if score >= 90:
+        return "很强"
+    if score >= 60:
+        return "中等"
+    if score >= 30:
+        return "偏弱"
+    return "很弱"
+
+
+def source_status_copy(status: str) -> str:
+    return {
+        "ok": "在线",
+        "stale": "这条消息凉了",
+        "error": "哨兵失联",
+        "degraded": "带伤工作，先不采信",
+        "disabled": "今天没出门",
+        "conflict": "两边口供对不上",
+        "unhealthy": "上游在打瞌睡",
+        "unknown": "状态没说清",
+    }.get(status, status)
+
+
 def render_text(payload: dict[str, Any]) -> str:
     lines: list[str] = []
     advice = payload.get("advice") or {}
     weekly = payload.get("weekly") or {}
     signal = payload.get("signal") or {}
     if advice.get("status") == "ok":
+        label = advice["advice"]
+        headroom = float(advice["safe_headroom_percent"])
+        gap_copy = (
+            f"到正常重置还能多出 {headroom:.1f}%"
+            if headroom >= 0
+            else f"离安全线还差 {abs(headroom):.1f}%"
+        )
+        burn_copy = (
+            "历史还不够，先按本周期平均速度估"
+            if advice.get("burn_estimation") == "cold-start-average"
+            else f"参考 {advice.get('burn_samples', 0)} 个近期消耗区间"
+        )
+        score = float(advice["event_signal_percent"])
+        combined = float(advice["combined_decision_score"])
         lines.extend(
             [
-                f"建议：{advice['advice']}",
-                f"原因：{advice['reason']}",
+                advice_title(label),
+                f"今天怎么用：{advice_action(label, advice['safety_reserve_percent'])}",
+                f"为什么：{advice['reason']}",
+                f"这笔账：{gap_copy}；正常重置还有 {human_duration(advice['hours_to_weekly_reset'])}。",
                 "",
-                f"周额度：已用 {advice['weekly_used_percent']:.1f}%｜剩余 {advice['weekly_remaining_percent']:.1f}%",
-                f"正常重置：{advice['hours_to_weekly_reset']:.1f} 小时后",
-                f"预计需求：{advice['expected_need_percent']:.1f}%｜安全储备 {advice['safety_reserve_percent']:.1f}%",
-                f"临时重置信号：{advice['event_signal_percent']:.1f}/100（{advice['event_signal_kind']}）"
-                f" × 到账折扣 {advice['arrival_discount_percent']:.1f}%"
-                f" = 决策分 {advice['combined_decision_score']:.1f}",
-                f"风险折算额度：{advice['risk_adjusted_reset_credit_percent']:.1f}%｜安全余量 {advice['safe_headroom_percent']:.1f}%",
-                f"消耗估计：{advice['burn_estimation']}（{advice['burn_samples']} 个历史区间）",
+                f"周额度：剩 {advice['weekly_remaining_percent']:.1f}%（已用 {advice['weekly_used_percent']:.1f}%）",
+                f"续航：预计还要 {advice['expected_need_percent']:.1f}% + 安全垫 {advice['safety_reserve_percent']:.1f}%",
+                f"重置风声：{signal_strength(score, advice.get('signal_missing', False))}"
+                f"（{score:.0f}%）｜按你的到账折扣剩 {combined:.1f}%，不当额度花",
+                f"速度依据：{burn_copy}",
             ]
         )
         if advice.get("signal_missing"):
-            lines.append("提示：公共信号不可用，本次不计入任何临时重置收益。")
+            lines.append("护栏：公共风声不可用，本次临时重置收益按 0 计算。")
     else:
+        label = advice.get("advice", "先别赌")
         lines.extend(
             [
-                f"建议：{advice.get('advice', '先别赌')}",
-                f"原因：{advice.get('reason', '关键数据不足。')}",
+                advice_title(label),
+                f"今天怎么用：{advice_action(label)}",
+                f"卡在哪：{advice.get('reason', '关键数据不足。')}",
             ]
         )
     banked = weekly.get("banked_resets")
     if isinstance(banked, dict):
         count = banked.get("available_count")
-        lines.append(f"Banked reset：{count if count is not None else '未知'} 个（未自动计入建议）")
         expiries = [
             parse_time(item.get("expires_at"))
             for item in banked.get("details", [])
-            if isinstance(item, dict) and item.get("expires_at") is not None
+            if (
+                isinstance(item, dict)
+                and item.get("expires_at") is not None
+                and str(item.get("status") or "").lower() == "available"
+            )
         ]
-        expiries = [value for value in expiries if value is not None]
-        if expiries:
-            lines.append(f"最近到期：{iso(min(expiries))}")
+        now = utc_now()
+        expiries = [value for value in expiries if value is not None and value > now]
+        if count == 0:
+            lines.append("重置卡：当前没有可用卡")
+        elif expiries:
+            expiry_hours = (min(expiries) - now).total_seconds() / 3600
+            expiry_copy = f"最近一张约 {human_duration(expiry_hours)}后到期"
+            lines.append(
+                f"重置卡：{count if count is not None else '未知'} 张，{expiry_copy}；没算进上面的安全额度"
+            )
         elif count:
-            lines.append("到期信息：上游仅返回权威计数，未提供明细")
+            lines.append(f"重置卡：{count} 张，到期时间未知；没算进上面的安全额度")
+        else:
+            lines.append("重置卡：数量和到期时间都未知")
     if weekly.get("error"):
-        lines.append(f"本机额度读取：失败（{weekly['error']}）")
+        lines.append(f"本机账本：门没打开，额度没读到（{weekly['error']}）")
     lines.append("")
-    lines.append(f"公共信号：{signal.get('event_state', 'unknown')}")
+    event_state = signal.get("event_state", "unknown")
+    event_copy = {
+        "confirmed": "公共来源确认事件发生，等你账户自己报到",
+        "announced": "Tibo 那边有动静，但你账户还没报到",
+        "manual": "采用你手动给的风声",
+        "uncertain": "线索有点虚，先按没重置算",
+        "likely": "风声在路上，还没到账",
+        "unlikely": "今天没听见按钮响",
+        "conflict": "两边口供对不上，按没重置算",
+        "unknown": "还没等到可信口供",
+    }.get(event_state, event_state)
+    lines.append(f"公共哨兵：{event_copy}。别把 Tibo 的心情当你的预算。")
     for source in signal.get("sources", []):
         detail = source.get("status", "unknown")
         age = source.get("age_minutes")
         if age is not None:
-            detail += f"，{age:.1f} 分钟前"
-        lines.append(f"- {source.get('name')}: {detail}")
+            detail = f"{source_status_copy(detail)}，{human_duration(age / 60)}前更新"
+        else:
+            detail = source_status_copy(detail)
+        lines.append(f"- {source.get('name')}：{detail}")
     if signal.get("evidence_url"):
         lines.append(f"证据：{signal['evidence_url']}")
     return "\n".join(lines)
