@@ -29,6 +29,58 @@ class ResetWatchTests(unittest.TestCase):
             "window_minutes": resetwatch.WEEK_MINUTES,
         }
 
+    def codex_status(
+        self,
+        *,
+        score: float | None = 80,
+        observed_hours_ago: float = 5,
+        expires_hours_from_now: float = 20,
+        latest_hours_ago: float = 48,
+        latest_type: str = "regular",
+        generated_hours_ago: float = 0,
+    ) -> dict:
+        now = resetwatch.utc_now()
+        watch = None
+        if score is not None:
+            watch = {
+                "level": "elevated",
+                "reset_chance_percent": score,
+                "forecast_window": "by end of Saturday",
+                "observed_at": resetwatch.iso(
+                    now - dt.timedelta(hours=observed_hours_ago)
+                ),
+                "expires_at": resetwatch.iso(
+                    now + dt.timedelta(hours=expires_hours_from_now)
+                ),
+                "source": {
+                    "type": "x_post",
+                    "author": "thsottiaux",
+                    "url": "https://x.com/thsottiaux/status/watch",
+                },
+            }
+        return {
+            "data": {
+                "latest_reset": {
+                    "reset_type": latest_type,
+                    "announced_at": resetwatch.iso(
+                        now - dt.timedelta(hours=latest_hours_ago)
+                    ),
+                    "source": {
+                        "type": "x_post",
+                        "author": "thsottiaux",
+                        "url": "https://x.com/thsottiaux/status/reset",
+                    },
+                },
+                "active_watch": watch,
+            },
+            "meta": {
+                "api_version": "v1",
+                "generated_at": resetwatch.iso(
+                    now - dt.timedelta(hours=generated_hours_ago)
+                ),
+            },
+        }
+
     def test_confirmed_signal_affects_default_model(self) -> None:
         signal = {
             "event_signal_adjusted": 100.0,
@@ -67,19 +119,14 @@ class ResetWatchTests(unittest.TestCase):
 
     def test_confirmed_event_also_receives_freshness_discount(self) -> None:
         original = resetwatch.fetch_json
-        checked_at = resetwatch.utc_now() - dt.timedelta(minutes=75)
+        payload = self.codex_status(
+            score=None,
+            latest_hours_ago=1.25,
+        )
 
         def fake_fetch(url: str, timeout: float = 8.0) -> dict:
-            if url == resetwatch.WILL_URL:
-                raise RuntimeError("unavailable")
-            return {
-                "state": "yes",
-                "updatedAt": int(checked_at.timestamp() * 1000),
-                "automationSummary": {
-                    "verdict": "reset_confirmed",
-                    "mode": "active",
-                },
-            }
+            self.assertEqual(url, resetwatch.CODEX_RESETS_URL)
+            return payload
 
         resetwatch.fetch_json = fake_fetch
         try:
@@ -89,6 +136,177 @@ class ResetWatchTests(unittest.TestCase):
         self.assertEqual(signal["event_signal_raw"], 100.0)
         self.assertAlmostEqual(signal["event_signal_adjusted"], 50.0, delta=0.1)
         self.assertTrue(signal["signal_usable"])
+
+    def test_active_watch_uses_expiry_not_post_age(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(observed_hours_ago=5, expires_hours_from_now=20)
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            self.assertEqual(url, resetwatch.CODEX_RESETS_URL)
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertEqual(signal["event_signal_adjusted"], 80.0)
+        self.assertEqual(signal["selected_source"], "codex-resets")
+        self.assertEqual(signal["event_state"], "likely")
+        self.assertEqual(
+            signal["evidence_url"],
+            "https://x.com/thsottiaux/status/watch",
+        )
+        self.assertIsNotNone(signal["event_expires_at"])
+
+    def test_expired_watch_does_not_become_a_signal(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(expires_hours_from_now=-1)
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertIsNone(signal["event_signal_adjusted"])
+        self.assertFalse(signal["signal_usable"])
+        self.assertEqual(signal["sources"][0]["status"], "ok")
+        self.assertEqual(
+            signal["sources"][0]["rejection_reason"],
+            "watch-expired-or-invalid",
+        )
+
+    def test_old_confirmation_does_not_override_new_watch(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(
+            observed_hours_ago=1,
+            latest_hours_ago=1.5,
+        )
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertEqual(signal["event_state"], "likely")
+        self.assertEqual(signal["event_signal_adjusted"], 80.0)
+
+    def test_new_confirmation_overrides_watch(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(
+            observed_hours_ago=1.5,
+            latest_hours_ago=1,
+        )
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertEqual(signal["event_state"], "confirmed")
+        self.assertEqual(signal["event_signal_raw"], 100.0)
+        self.assertEqual(
+            signal["evidence_url"],
+            "https://x.com/thsottiaux/status/reset",
+        )
+        self.assertIsNotNone(signal["event_expires_at"])
+
+    def test_invalid_new_watch_still_blocks_older_confirmation(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(
+            score=150,
+            observed_hours_ago=1,
+            latest_hours_ago=1.5,
+        )
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertFalse(signal["signal_usable"])
+        self.assertNotEqual(signal["event_state"], "confirmed")
+
+    def test_banked_reset_is_not_a_confirmed_full_reset(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(
+            score=None,
+            latest_hours_ago=1,
+            latest_type="banked",
+        )
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertFalse(signal["signal_usable"])
+        self.assertNotEqual(signal["event_state"], "confirmed")
+
+    def test_invalid_watch_score_is_not_clamped_into_a_signal(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(score=150)
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertFalse(signal["signal_usable"])
+        self.assertIsNone(signal["event_signal_adjusted"])
+
+    def test_watch_without_original_url_is_not_a_signal(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status()
+        payload["data"]["active_watch"]["source"] = {}
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertFalse(signal["signal_usable"])
+        self.assertIsNone(signal["evidence_url"])
+
+    def test_stale_api_does_not_become_a_signal(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status(generated_hours_ago=3)
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertIsNone(signal["event_signal_adjusted"])
+        self.assertFalse(signal["signal_usable"])
+        self.assertEqual(
+            signal["sources"][0]["rejection_reason"],
+            "api-stale-or-invalid-generated-at",
+        )
 
     def test_missing_signal_cannot_recommend_full_speed(self) -> None:
         signal = {
@@ -349,26 +567,11 @@ class ResetWatchTests(unittest.TestCase):
         self.assertIn("公共来源确认事件发生", text)
         self.assertNotIn("官方信号已确认", text)
 
-    def test_source_errors_disable_will_score(self) -> None:
+    def test_source_error_disables_public_signal(self) -> None:
         original = resetwatch.fetch_json
 
         def fake_fetch(url: str, timeout: float = 8.0) -> dict:
-            if url == resetwatch.WILL_URL:
-                return {
-                    "fetchedAt": resetwatch.iso(resetwatch.utc_now()),
-                    "forecast": {"score": 90, "resetAnnounced": True},
-                    "sourceErrors": {"x": "down"},
-                }
-            return {
-                "state": "no",
-                "updatedAt": int(time.time() * 1000),
-                "automationSummary": {
-                    "checkedAt": int(time.time() * 1000),
-                    "verdict": "uncertain",
-                    "mode": "inactive",
-                    "lastError": "down",
-                },
-            }
+            raise RuntimeError("down")
 
         resetwatch.fetch_json = fake_fetch
         try:
@@ -377,7 +580,28 @@ class ResetWatchTests(unittest.TestCase):
             resetwatch.fetch_json = original
         self.assertIsNone(signal["event_signal_adjusted"])
         self.assertFalse(signal["signal_usable"])
-        self.assertNotEqual(signal["event_state"], "announced")
+        self.assertEqual(signal["event_state"], "unknown")
+        self.assertEqual(signal["sources"][0]["status"], "error")
+        advice = resetwatch.calculate_advice(
+            self.weekly(used=5, hours=2), signal, 75.0, []
+        )
+        self.assertEqual(advice["status"], "ok")
+        self.assertEqual(advice["risk_adjusted_reset_credit_percent"], 0.0)
+        self.assertIn(advice["advice"], {"稳着蹬", "收着蹬"})
+
+    def test_no_network_never_fetches_public_source(self) -> None:
+        original = resetwatch.fetch_json
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            raise AssertionError("network should not be used")
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, True)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertFalse(signal["signal_usable"])
+        self.assertEqual(signal["sources"][0]["status"], "disabled")
 
 
 if __name__ == "__main__":

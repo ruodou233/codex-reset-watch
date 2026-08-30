@@ -17,9 +17,8 @@ import time
 import urllib.request
 from typing import Any
 
-VERSION = "0.1.0"
-WILL_URL = "https://www.willcodexquotareset.com/api/forecast"
-HAS_URL = "https://hascodexratelimitreset.today/api/status"
+VERSION = "0.2.0"
+CODEX_RESETS_URL = "https://codex-resets.com/api/v1/status"
 WEEK_MINUTES = 7 * 24 * 60
 SOURCE_STALE_SECONDS = 2 * 60 * 60
 SOURCE_FRESH_SECONDS = 30 * 60
@@ -99,13 +98,34 @@ def freshness_multiplier(age: float | None) -> float:
     return (SOURCE_STALE_SECONDS - age) / span
 
 
+def numeric_score(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or not 0 <= number <= 100:
+        return None
+    return number
+
+
+def source_url(record: Any) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    source = record.get("source")
+    if not isinstance(source, dict):
+        return None
+    url = source.get("url")
+    return url if isinstance(url, str) and url else None
+
+
 def fetch_public_signal(manual_probability: float | None, no_network: bool) -> dict[str, Any]:
     result: dict[str, Any] = {
         "event_signal_raw": None,
         "event_signal_adjusted": None,
         "signal_kind": None,
         "signal_usable": False,
+        "selected_source": None,
         "event_state": "unknown",
+        "event_expires_at": None,
         "sources": [],
         "evidence_url": None,
     }
@@ -117,6 +137,7 @@ def fetch_public_signal(manual_probability: float | None, no_network: bool) -> d
                 "event_signal_adjusted": probability,
                 "signal_kind": "manual-probability",
                 "signal_usable": True,
+                "selected_source": "manual",
                 "event_state": "manual",
                 "sources": [{"name": "manual", "status": "ok", "fresh": True}],
             }
@@ -126,101 +147,100 @@ def fetch_public_signal(manual_probability: float | None, no_network: bool) -> d
         result["sources"].append({"name": "network", "status": "disabled", "fresh": False})
         return result
 
-    will_score: float | None = None
     try:
-        payload = fetch_json(WILL_URL)
-        fetched_at = parse_time(payload.get("fetchedAt"))
-        age = source_age_seconds(fetched_at)
-        forecast = payload.get("forecast") or {}
-        raw_score = forecast.get("score")
-        if isinstance(raw_score, (int, float)):
-            will_score = clamp(float(raw_score), 0, 100)
-        source_errors = payload.get("sourceErrors")
-        has_source_errors = bool(source_errors)
-        usable = age is not None and age <= SOURCE_STALE_SECONDS and not has_source_errors
-        announced = bool(forecast.get("resetAnnounced")) and usable
-        result["sources"].append(
-            {
-                "name": "will-codex-reset",
-                "status": "ok" if usable else ("degraded" if has_source_errors else "stale"),
-                "fresh": usable,
-                "fetched_at": iso(fetched_at),
-                "age_minutes": round(age / 60, 1) if age is not None else None,
-                "score": will_score,
-                "upstream_error": has_source_errors,
-            }
+        payload = fetch_json(CODEX_RESETS_URL)
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        generated_at = parse_time(meta.get("generated_at"))
+        generated_age = source_age_seconds(generated_at)
+        healthy = generated_age is not None and generated_age <= SOURCE_STALE_SECONDS
+
+        watch = data.get("active_watch") if isinstance(data.get("active_watch"), dict) else None
+        latest = data.get("latest_reset") if isinstance(data.get("latest_reset"), dict) else None
+        observed_at = parse_time(watch.get("observed_at")) if watch else None
+        expires_at = parse_time(watch.get("expires_at")) if watch else None
+        score = numeric_score(watch.get("reset_chance_percent")) if watch else None
+        watch_url = source_url(watch)
+        latest_at = parse_time(latest.get("announced_at")) if latest else None
+        latest_type = latest.get("reset_type") if latest else None
+        latest_age = source_age_seconds(latest_at)
+        latest_url = source_url(latest)
+        now = utc_now()
+        watch_valid = bool(
+            healthy
+            and score is not None
+            and watch_url is not None
+            and observed_at is not None
+            and expires_at is not None
+            and observed_at <= now
+            and observed_at < expires_at
+            and now < expires_at
         )
-        if announced:
-            result["event_state"] = "announced"
-            will_score = 100.0
-        if will_score is not None:
-            result["event_signal_raw"] = will_score
-            result["event_signal_adjusted"] = round(
-                will_score * freshness_multiplier(age), 2
-            ) if usable else None
-            result["signal_kind"] = "heuristic-score"
-            result["signal_usable"] = usable
-    except Exception as exc:
-        result["sources"].append(
-            {"name": "will-codex-reset", "status": "error", "fresh": False, "error": str(exc)}
+        latest_fresh = bool(
+            healthy
+            and latest_type == "regular"
+            and latest_url is not None
+            and latest_age is not None
+            and latest_age <= SOURCE_STALE_SECONDS
         )
 
-    try:
-        payload = fetch_json(HAS_URL)
-        summary = payload.get("automationSummary") or {}
-        verdict = str(summary.get("verdict") or "").lower()
-        state = str(payload.get("state") or "").lower()
-        latest = summary.get("latest") if isinstance(summary.get("latest"), dict) else {}
-        if state == "yes":
-            checked_at = parse_time(payload.get("updatedAt"))
-        elif verdict == "reset_confirmed":
-            checked_at = parse_time(latest.get("checkedAt") or summary.get("checkedAt"))
-        else:
-            checked_at = parse_time(summary.get("checkedAt") or payload.get("updatedAt"))
-        age = source_age_seconds(checked_at)
-        mode = summary.get("mode")
-        last_error = summary.get("lastError")
-        healthy = not last_error and mode != "inactive"
-        confirmed = (verdict == "reset_confirmed" or state == "yes") and healthy
-        status = "ok"
-        if last_error or mode == "inactive":
-            status = "degraded"
-        if age is None or age > SOURCE_STALE_SECONDS:
-            status = "stale"
+        status = "ok" if healthy else "stale"
+        rejection_reason = None
+        if not healthy:
+            rejection_reason = "api-stale-or-invalid-generated-at"
+        elif watch and not watch_valid and not latest_fresh:
+            rejection_reason = "watch-expired-or-invalid"
+        elif not watch_valid and not latest_fresh:
+            rejection_reason = "no-active-signal"
         result["sources"].append(
             {
-                "name": "has-codex-reset",
+                "name": "codex-resets",
                 "status": status,
-                "fresh": age is not None and age <= SOURCE_STALE_SECONDS and healthy,
-                "checked_at": iso(checked_at),
-                "age_minutes": round(age / 60, 1) if age is not None else None,
-                "verdict": verdict or None,
-                "mode": mode,
-                "upstream_error": bool(last_error),
+                "fresh": healthy,
+                "generated_at": iso(generated_at),
+                "age_minutes": round(generated_age / 60, 1) if generated_age is not None else None,
+                "score": score,
+                "level": watch.get("level") if watch else None,
+                "forecast_window": watch.get("forecast_window") if watch else None,
+                "observed_at": iso(observed_at),
+                "expires_at": iso(expires_at),
+                "latest_reset_at": iso(latest_at),
+                "latest_reset_type": latest_type,
+                "source_url": watch_url or latest_url,
+                "rejection_reason": rejection_reason,
             }
         )
-        tweet_url = summary.get("tweetUrl")
-        if tweet_url and age is not None and age <= SOURCE_STALE_SECONDS and healthy:
-            result["evidence_url"] = tweet_url
-        if confirmed and age is not None and age <= SOURCE_STALE_SECONDS:
-            result["event_state"] = "confirmed"
+
+        newer_confirmation = bool(
+            latest_fresh
+            and latest_at is not None
+            and (observed_at is None or latest_at >= observed_at)
+        )
+        if newer_confirmation:
             result["event_signal_raw"] = 100.0
             result["event_signal_adjusted"] = round(
-                100.0 * freshness_multiplier(age), 2
+                100.0 * freshness_multiplier(latest_age), 2
             )
             result["signal_kind"] = "confirmed-event"
             result["signal_usable"] = True
-        elif (
-            result["event_state"] == "unknown"
-            and verdict == "uncertain"
-            and age is not None
-            and age <= SOURCE_STALE_SECONDS
-            and not last_error
-        ):
-            result["event_state"] = "uncertain"
+            result["selected_source"] = "codex-resets"
+            result["event_state"] = "confirmed"
+            result["event_expires_at"] = iso(
+                latest_at + dt.timedelta(seconds=SOURCE_STALE_SECONDS)
+            )
+            result["evidence_url"] = latest_url
+        elif watch_valid and score is not None:
+            result["event_signal_raw"] = score
+            result["event_signal_adjusted"] = score
+            result["signal_kind"] = "heuristic-score"
+            result["signal_usable"] = True
+            result["selected_source"] = "codex-resets"
+            result["event_state"] = "likely"
+            result["event_expires_at"] = iso(expires_at)
+            result["evidence_url"] = watch_url
     except Exception as exc:
         result["sources"].append(
-            {"name": "has-codex-reset", "status": "error", "fresh": False, "error": str(exc)}
+            {"name": "codex-resets", "status": "error", "fresh": False, "error": str(exc)}
         )
     return result
 
@@ -639,6 +659,10 @@ def render_text(payload: dict[str, Any]) -> str:
         )
         if advice.get("signal_missing"):
             lines.append("护栏：公共风声不可用，本次临时重置收益按 0 计算。")
+        event_expires_at = parse_time(signal.get("event_expires_at"))
+        if event_expires_at and event_expires_at > utc_now():
+            expiry_hours = (event_expires_at - utc_now()).total_seconds() / 3600
+            lines.append(f"风声窗口：约 {human_duration(expiry_hours)}后到期")
     else:
         label = advice.get("advice", "先别赌")
         lines.extend(

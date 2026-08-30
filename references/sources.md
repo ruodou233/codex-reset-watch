@@ -2,28 +2,23 @@
 
 ## 默认公共来源
 
-### Will Codex Reset
+### Codex Resets
 
-- Endpoint: `https://www.willcodexquotareset.com/api/forecast`
-- 使用字段：`forecast.score`、`forecast.resetAnnounced`、`forecast.breakdown`、`fetchedAt`、`sourceErrors`。
-- 定位：透明启发式评分，不视为统计校准概率。
-- 入选原因：同时提供评分、抓取时间和来源错误字段，便于审计“风声有多强、数据是否还活着”。
+- Endpoint: `https://codex-resets.com/api/v1/status`
+- 使用字段：`meta.generated_at`、`data.active_watch`、`data.latest_reset` 及其原始证据 URL。
+- 定位：第三方聚合的 Tibo 动态、active watch 和重置历史，不是 OpenAI 官方接口。
+- `reset_chance_percent` 是 AI 分类得到的启发式评分，不视为统计校准概率。
 
-### Has Codex Rate Limit Reset Today
+只保留这一条公共来源，是因为旧来源在 2026-08-29 的现场核验中分别出现持续漏报和上游停摆。来源数量不等于证据数量；多个网站转载同一条 Tibo 帖子不会增加独立信息。
 
-- Endpoint: `https://hascodexratelimitreset.today/api/status`
-- 使用字段：`automationSummary.verdict`、`tweetId`、`tweetUrl`、`checkedAt`、`mode`、`lastError`。
-- 定位：Tibo 帖子分类与“是否已确认”的辅助来源，不提供未来概率。
-- `reset_confirmed` 或明确 `state=yes` 可以将事件状态提升为“已宣布/已确认”，但不能证明用户个人到账。
-- 入选原因：补充具体帖子证据与事件确认状态；它与前一来源可能依赖同一帖子，因此不当作独立第二票。
+## 事件选择与时间语义
 
-## 聚合规则
-
-- 手动输入概率优先于网站评分，并标记为 `manual-probability`。
-- HasCodex 健康且明确确认重置时，确认事件分记为 100%，但仍乘以套餐到账折扣；这不代表个人到账概率为 100%。
-- HasCodex 未确认不能将未来概率压到 0；“今天没有确认”不等于“未来 48 小时不会发生”。
-- 公共数据超过两小时或来源报告内部错误时视为不可用，不用于积极建议；超过半小时开始施加新鲜度折扣。半小时与两小时是针对高时效重置事件的操作默认：前半小时全权重，随后线性衰减，到两小时直接归零；这不是来源准确率的统计校准，应按上游更新节奏持续调整。
-- 两个网站可能依赖同一条 Tibo 原帖，不算两份独立证据。
+- 手动输入的概率优先，并标记为 `manual-probability`。
+- 公共事件分来自一个可用信号，不做多站点平均、求和或投票。
+- API 健康度由 `meta.generated_at` 判断：超过两小时或时间无效时不采信。
+- active watch 的有效性由 `observed_at` 与 `expires_at` 判断；在 `observed_at <= now < expires_at` 内使用其启发式评分。原帖较早不代表预测窗口已经失效。
+- 新鲜的 regular `latest_reset` 只在两小时内作为公共确认事件；若它早于当前 active watch，不覆盖新的预测。banked reset 继续由本机账户数据单独展示，不当作即时全量重置。
+- active watch 已过期、字段无效或 API 失败时，公共信号记为缺失，不把失败解释为“不会重置”。
 
 ## 本机 Codex 数据
 
@@ -37,12 +32,14 @@ account/rateLimits/read
 
 失败时不读取聊天、prompt 或认证文件，也不把历史 rollout 快照冒充实时数据；改为要求用户手动输入周额度和重置时间。
 
+公共来源的“确认”不代表用户个人到账。本机额度变化只能称“观察到变化”或“疑似到账”，不能据此断言重置原因。
+
 ## 隐私
 
 - 不需要普通 X/Twitter 登录账号。
 - 不读取浏览器 Cookie。
 - 不上传 Codex 凭据、邮箱、会话或提示词。
-- 网络请求会向上述网站暴露 IP、时间和 User-Agent。
+- 网络请求会向 `codex-resets.com` 暴露 IP、时间和 User-Agent。
 - 开源更新检查启用时还会访问 `github.com/ruodou233/codex-reset-watch`，同样会暴露 IP、时间和 User-Agent；可用 `~/.config/agentops-skills/no-update-check` 或 `~/.config/agentops-skills/codex-reset-watch.no-update-check` 关闭。
 - 更新检查只在 `~/.cache/codex-reset-watch/update-checked-at` 保存最近一次成功核验的 ISO 时间，不保存账户、仓库内容或额度数据。
 - 本地历史只记录额度百分比、窗口重置时间和采样时间，用于估算消耗速度。
