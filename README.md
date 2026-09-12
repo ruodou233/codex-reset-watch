@@ -1,4 +1,6 @@
-# codex-reset-watch — Codex 额度哨兵
+# Codex 额度哨兵｜Codex Usage & Reset Monitor
+
+Track Codex usage limits, spending pace, and reset signals to plan your next tasks.
 
 Codex 周额度该省着用，还是可以猛猛蹬？这个 Skill 把剩余额度、最近用得多快、离正常重置还有多久，以及公共临时重置信号放到一起看，帮你安排接下来怎么用。今天能不能开大任务，要不要留点额度过周末，社区喊重置了自己到账没，都能查明白，不用对着百分比猜。
 
