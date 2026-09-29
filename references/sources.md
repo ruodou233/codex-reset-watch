@@ -40,6 +40,4 @@ account/rateLimits/read
 - 不读取浏览器 Cookie。
 - 不上传 Codex 凭据、邮箱、会话或提示词。
 - 网络请求会向 `codex-resets.com` 暴露 IP、时间和 User-Agent。
-- 开源更新检查启用时还会访问 `github.com/ruodou233/codex-reset-watch`，同样会暴露 IP、时间和 User-Agent；可用 `~/.config/agentops-skills/no-update-check` 或 `~/.config/agentops-skills/codex-reset-watch.no-update-check` 关闭。
-- 更新检查只在 `~/.cache/codex-reset-watch/update-checked-at` 保存最近一次成功核验的 ISO 时间，不保存账户、仓库内容或额度数据。
 - 本地历史只记录额度百分比、窗口重置时间和采样时间，用于估算消耗速度。

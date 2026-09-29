@@ -179,6 +179,25 @@ class ResetWatchTests(unittest.TestCase):
             "watch-expired-or-invalid",
         )
 
+    def test_unscored_active_watch_is_listed_but_not_counted(self) -> None:
+        original = resetwatch.fetch_json
+        payload = self.codex_status()
+        payload["data"]["active_watch"]["reset_chance_percent"] = None
+        payload["data"]["active_watch"]["source"] = {"type": "observed"}
+
+        def fake_fetch(url: str, timeout: float = 8.0) -> dict:
+            return payload
+
+        resetwatch.fetch_json = fake_fetch
+        try:
+            signal = resetwatch.fetch_public_signal(None, False)
+        finally:
+            resetwatch.fetch_json = original
+        self.assertFalse(signal["signal_usable"])
+        self.assertEqual(signal["sources"][0]["rejection_reason"], "watch-unscored")
+        text = resetwatch.render_text({"signal": signal, "weekly": {}, "advice": {}})
+        self.assertIn("没计入的风声", text)
+
     def test_old_confirmation_does_not_override_new_watch(self) -> None:
         original = resetwatch.fetch_json
         payload = self.codex_status(
@@ -543,10 +562,7 @@ class ResetWatchTests(unittest.TestCase):
             "ok": "在线",
             "stale": "消息凉了",
             "error": "哨兵失联",
-            "degraded": "带伤工作",
             "disabled": "没出门",
-            "conflict": "口供对不上",
-            "unhealthy": "打瞌睡",
             "unknown": "没说清",
         }
         for status, phrase in expected.items():

@@ -189,7 +189,15 @@ def fetch_public_signal(manual_probability: float | None, no_network: bool) -> d
         if not healthy:
             rejection_reason = "api-stale-or-invalid-generated-at"
         elif watch and not watch_valid and not latest_fresh:
-            rejection_reason = "watch-expired-or-invalid"
+            in_window = bool(
+                observed_at is not None
+                and expires_at is not None
+                and observed_at <= now < expires_at
+            )
+            if in_window and (score is None or watch_url is None):
+                rejection_reason = "watch-unscored"
+            else:
+                rejection_reason = "watch-expired-or-invalid"
         elif not watch_valid and not latest_fresh:
             rejection_reason = "no-active-signal"
         result["sources"].append(
@@ -615,10 +623,7 @@ def source_status_copy(status: str) -> str:
         "ok": "在线",
         "stale": "这条消息凉了",
         "error": "哨兵失联",
-        "degraded": "带伤工作，先不采信",
         "disabled": "今天没出门",
-        "conflict": "两边口供对不上",
-        "unhealthy": "上游在打瞌睡",
         "unknown": "状态没说清",
     }.get(status, status)
 
@@ -704,12 +709,8 @@ def render_text(payload: dict[str, Any]) -> str:
     event_state = signal.get("event_state", "unknown")
     event_copy = {
         "confirmed": "公共来源确认事件发生，等你账户自己报到",
-        "announced": "Tibo 那边有动静，但你账户还没报到",
         "manual": "采用你手动给的风声",
-        "uncertain": "线索有点虚，先按没重置算",
         "likely": "风声在路上，还没到账",
-        "unlikely": "今天没听见按钮响",
-        "conflict": "两边口供对不上，按没重置算",
         "unknown": "还没等到可信口供",
     }.get(event_state, event_state)
     lines.append(f"公共哨兵：{event_copy}。别把 Tibo 的心情当你的预算。")
@@ -721,6 +722,11 @@ def render_text(payload: dict[str, Any]) -> str:
         else:
             detail = source_status_copy(detail)
         lines.append(f"- {source.get('name')}：{detail}")
+        if source.get("rejection_reason") == "watch-unscored" and source.get("forecast_window"):
+            lines.append(
+                f"  另有一条没计入的风声：{source['forecast_window']}"
+                f"（强度 {source.get('level') or '未注明'}，没有评分或原帖，不当额度花）"
+            )
     if signal.get("evidence_url"):
         lines.append(f"证据：{signal['evidence_url']}")
     return "\n".join(lines)
