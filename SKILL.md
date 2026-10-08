@@ -1,6 +1,6 @@
 ---
 name: codex-reset-watch
-description: 检查 Codex 周额度、Tibo/社区临时重置信号与来源新鲜度，并用保守数学模型给出“猛猛蹬、可以加速蹬、稳着蹬、收着蹬”建议。Use when the user asks about Codex usage limits, weekly quota, reset probability, whether to conserve or spend tokens, Tibo/Thibault Sottiaux reset announcements, banked resets, or whether they can “猛猛蹬”.
+description: 检查 Codex 周额度与 Tibo/社区临时重置信号，用保守模型给出“猛猛蹬/可以加速蹬/稳着蹬/收着蹬”建议。Use when the user asks about Codex weekly quota, reset chances, Tibo reset announcements, or whether they can “猛猛蹬”.
 ---
 
 # Codex Reset Watch
@@ -14,7 +14,6 @@ description: 检查 Codex 周额度、Tibo/社区临时重置信号与来源新�
 - 执行脚本只依赖 Python 3.10+ 标准库；自动读取额度需要本机可用的 Codex CLI。
 - `codex app-server` 不可用时改用手动参数，不读取聊天、提示词、认证文件或浏览器 Cookie 兜底。
 - 公共来源是第三方网站，不是 OpenAI 官方接口；平台没有网页访问能力时仍可用 `--no-network` 运行本机基础建议。
-- 其他支持 `SKILL.md` 的 Agent 可以执行相同脚本；若平台不能调用本机命令，只能按本文模型解释用户手动提供的数据，不得声称已自动检查。
 - 自动读取目前以 macOS/Linux 为主要验证环境；Windows 的子进程管道兼容性未实测，失败时使用手动参数。
 
 ## 执行流程
@@ -36,12 +35,7 @@ python3 "<skill-dir>/scripts/resetwatch.py" check \
   --probability <未来48小时临时重置百分比>
 ```
 
-3. 用户只提供部分信息时：
-   - 有周额度、没有公共信号（含来源过期或失败）：按临时重置贡献 0 计算基础额度建议；即使余量充足也最多输出“稳着蹬”——积极档位容易被理解成“可以押注临时重置”。不升级为“先别赌”。
-   - 有概率、没有周额度：只报告信号，不能给“猛猛蹬”结论。
-   - 没有近期历史：用当前窗口的平均消耗速度估计；明确标注为冷启动。
-
-4. 以脚本输出为准转述档位、可行动建议和关键数字；任何来源过期、失败或手动输入的降级状态都要说出来。
+3. 以脚本输出为准转述档位、可行动建议和关键数字；任何来源过期、失败或手动输入的降级状态都要说出来。
 
 ## 建议档位
 
