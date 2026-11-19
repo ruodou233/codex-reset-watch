@@ -33,11 +33,11 @@ git clone https://github.com/ruodou233/codex-reset-watch.git ~/.claude/skills/co
 Codex：
 
 ```bash
-mkdir -p ~/.codex/skills
-git clone https://github.com/ruodou233/codex-reset-watch.git ~/.codex/skills/codex-reset-watch
+mkdir -p ~/.agents/skills
+git clone https://github.com/ruodou233/codex-reset-watch.git ~/.agents/skills/codex-reset-watch
 ```
 
-或通过 [agentops-skills](https://github.com/ruodou233/agentops-skills) 安装整套 Skill。
+也可以 `npx skills add ruodou233/codex-reset-watch -g`；其他 skill 见 [agentops-skills](https://github.com/ruodou233/agentops-skills) 目录。
 
 安装后可以直接问：
 
